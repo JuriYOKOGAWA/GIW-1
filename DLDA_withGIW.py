@@ -1,0 +1,179 @@
+import os
+import numpy as np
+from scipy.io import loadmat
+from sklearn.model_selection import KFold, train_test_split
+
+from Dlda3_optimized import Dlda3_optimized
+from knn import knn
+from measureEx import measureEx
+from avg import avg
+
+
+def _is_label_like(vec):
+    vec = np.asarray(vec).reshape(-1)
+    if vec.size < 2:
+        return False
+    if np.any(~np.isfinite(vec)):
+        return False
+    uniq = np.unique(vec)
+    if len(uniq) < 2 or len(uniq) > 20:
+        return False
+    # ラベル想定: ほぼ整数
+    return np.allclose(vec, np.round(vec), atol=1e-6)
+
+
+def load_twodiamonds(path="data/data_TwoDiamonds.mat"):
+    mat = loadmat(path)
+
+    # 候補行列を探索（__xxx を除外）
+    candidates = []
+    for key, value in mat.items():
+        if key.startswith("__"):
+            continue
+        if isinstance(value, np.ndarray) and value.ndim == 2 and min(value.shape) >= 2:
+            candidates.append((key, value))
+
+    if not candidates:
+        raise ValueError(f"{path} から有効な2次元データを検出できませんでした。")
+
+    # 1) 最終行がラベルの形式を優先 2) 最終列がラベルなら転置
+    data_fx_s = None
+    used_key = None
+    for key, arr in candidates:
+        if _is_label_like(arr[-1, :]):
+            data_fx_s = arr.astype(float)
+            used_key = key
+            break
+        if _is_label_like(arr[:, -1]):
+            data_fx_s = arr.T.astype(float)
+            used_key = key
+            break
+
+    if data_fx_s is None:
+        # フォールバック: 最初の候補を採用（最終行をラベル扱い）
+        used_key, arr = candidates[0]
+        data_fx_s = arr.astype(float)
+
+    X = data_fx_s[:-1, :].T  # (n_samples, n_features)
+    y = data_fx_s[-1, :]     # (n_samples,)
+
+    # 2値分類チェック
+    uniq = np.unique(y)
+    if len(uniq) != 2:
+        raise ValueError(f"2値分類データを想定していますが、クラス数={len(uniq)} です。key={used_key}")
+
+    # Dlda3_optimized 用に {1,2} へマップ
+    label_map = {uniq[0]: 1, uniq[1]: 2}
+    y12 = np.vectorize(label_map.get)(y).astype(int)
+
+    return X, y12
+
+
+def run_dlda_grid_search(
+    train_features,
+    train_labels,
+    h_values,
+    lambda_values,
+    k_neighbors=3
+):
+    train_features = np.asarray(train_features)
+    train_labels = np.asarray(train_labels).astype(int).reshape(-1)
+
+    # Dlda3_optimized の入力形式: (features x samples), 最終行がラベル
+    dlda_input = np.vstack([train_features.T, train_labels.reshape(1, -1)])
+
+    n_features = train_features.shape[1]
+    n_h = len(h_values)
+    n_lam = len(lambda_values)
+
+    WW = np.zeros((n_features, n_lam, n_h))
+    JJ = np.zeros((n_h, n_lam))
+    ACC = np.zeros((n_h, n_lam))
+
+    for ii, h in enumerate(h_values):
+        print(f"Progress: h iteration {ii + 1}/{n_h} (h={h:.4f})")
+
+        for jj, lambda_param in enumerate(lambda_values):
+            W, J = Dlda3_optimized(dlda_input, lambda_param, h)
+            WW[:, jj, ii] = W.flatten()
+            JJ[ii, jj] = J
+
+            projected = (dlda_input[:-1, :].T @ W).reshape(-1, 1)
+
+            kf = KFold(n_splits=10, shuffle=True, random_state=42)
+            fold_acc = []
+
+            for tr_idx, va_idx in kf.split(projected):
+                x_tr = projected[tr_idx]
+                y_tr = train_labels[tr_idx]
+                x_va = projected[va_idx]
+                y_va = train_labels[va_idx]
+
+                pred, _ = knn(x_tr, y_tr, x_va, k=k_neighbors)
+                acc = measureEx(y_va, pred, 8) * 100
+                fold_acc.append(acc)
+
+            ACC[ii, jj] = avg(fold_acc)
+
+    print("\nGrid search completed!")
+
+    best_ii, best_jj = np.unravel_index(np.argmax(ACC), ACC.shape)
+    best_result = {
+        "best_h": h_values[best_ii],
+        "best_lambda": lambda_values[best_jj],
+        "best_acc_cv": ACC[best_ii, best_jj],
+        "best_W_cv": WW[:, best_jj, best_ii]
+    }
+
+    return WW, JJ, ACC, best_result
+
+
+def main():
+    # 1) データ読み込み
+    X, y = load_twodiamonds("data/data_TwoDiamonds.mat")
+    print(f"Loaded: X={X.shape}, y={y.shape}, classes={np.unique(y)}")
+
+    # 2) 学習/テスト分割
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    # 3) ハイパーパラメータ範囲
+    h_values = np.linspace(0.1, 2.0, 20)
+    lambda_values = np.logspace(-4, 1, 20)
+
+    # 4) 学習データでグリッドサーチ
+    WW, JJ, ACC, best = run_dlda_grid_search(
+        train_features=X_train,
+        train_labels=y_train,
+        h_values=h_values,
+        lambda_values=lambda_values,
+        k_neighbors=3
+    )
+    print("Best from CV:", best)
+
+    # 5) 最良パラメータで再学習
+    train_data_for_dlda = np.vstack([X_train.T, y_train.reshape(1, -1)])
+    best_W, _ = Dlda3_optimized(
+        train_data_for_dlda,
+        lambda_param=best["best_lambda"],
+        h=best["best_h"]
+    )
+
+    # 6) テスト予測
+    train_proj = (X_train @ best_W).reshape(-1, 1)
+    test_proj = (X_test @ best_W).reshape(-1, 1)
+
+    y_pred_test, _ = knn(train_proj, y_train, test_proj, k=3)
+    test_acc = measureEx(y_test, y_pred_test, 8) * 100
+
+    print(f"Test Accuracy: {test_acc:.4f}%")
+
+    # 7) 保存
+    os.makedirs("output", exist_ok=True)
+    np.savetxt("output/test_acc_DLDA.txt", np.array([test_acc]), fmt="%.6f")
+    print("Saved: output/test_acc_DLDA.txt")
+
+
+if __name__ == "__main__":
+    main()
