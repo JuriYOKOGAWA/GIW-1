@@ -23,49 +23,30 @@ def _is_label_like(vec):
 
 
 def load_twodiamonds(path="data/data_TwoDiamonds.mat"):
+    """
+    TwoDiamonds データセットを読み込む
+    
+    Returns:
+        X: (n_samples, n_features)
+        y: (n_samples,)
+    """
     mat = loadmat(path)
-
-    # 候補行列を探索（__xxx を除外）
-    candidates = []
-    for key, value in mat.items():
-        if key.startswith("__"):
-            continue
-        if isinstance(value, np.ndarray) and value.ndim == 2 and min(value.shape) >= 2:
-            candidates.append((key, value))
-
-    if not candidates:
-        raise ValueError(f"{path} から有効な2次元データを検出できませんでした。")
-
-    # 1) 最終行がラベルの形式を優先 2) 最終列がラベルなら転置
-    data_fx_s = None
-    used_key = None
-    for key, arr in candidates:
-        if _is_label_like(arr[-1, :]):
-            data_fx_s = arr.astype(float)
-            used_key = key
-            break
-        if _is_label_like(arr[:, -1]):
-            data_fx_s = arr.T.astype(float)
-            used_key = key
-            break
-
-    if data_fx_s is None:
-        # フォールバック: 最初の候補を採用（最終行をラベル扱い）
-        used_key, arr = candidates[0]
-        data_fx_s = arr.astype(float)
-
-    X = data_fx_s[:-1, :].T  # (n_samples, n_features)
-    y = data_fx_s[-1, :]     # (n_samples,)
-
+    
+    # D: (800, 2), L: (800, 1) を抽出
+    X = mat['D'].astype(float)  # (800, 2)
+    y = mat['L'].astype(int).reshape(-1)  # (800,)
+    
+    print(f"Raw loaded: X={X.shape}, y={y.shape}, unique labels={np.unique(y)}")
+    
     # 2値分類チェック
     uniq = np.unique(y)
     if len(uniq) != 2:
-        raise ValueError(f"2値分類データを想定していますが、クラス数={len(uniq)} です。key={used_key}")
-
-    # Dlda3_optimized 用に {1,2} へマップ
+        raise ValueError(f"2値分類を想定していますが、クラス数={len(uniq)} です")
+    
+    # Dlda3_optimized 用に {1, 2} へマップ
     label_map = {uniq[0]: 1, uniq[1]: 2}
     y12 = np.vectorize(label_map.get)(y).astype(int)
-
+    
     return X, y12
 
 
