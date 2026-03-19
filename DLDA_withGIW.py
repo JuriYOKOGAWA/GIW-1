@@ -133,27 +133,36 @@ def main():
     )
     print("Best from CV:", best)
 
-    # 5) 最良パラメータで再学習
-    train_data_for_dlda = np.vstack([X_train.T, y_train.reshape(1, -1)])
-    best_W, _ = Dlda3_optimized(
-        train_data_for_dlda,
-        lambda_param=best["best_lambda"],
-        h=best["best_h"]
-    )
+    # 5) 各 h ごとに最良の lambda でのテスト精度を計算
+    test_acc_per_h = []
+    
+    for ii, h in enumerate(h_values):
+        # この h での最良の lambda を取得
+        best_jj_for_h = np.argmax(ACC[ii, :])
+        best_lambda_for_h = lambda_values[best_jj_for_h]
+        
+        # 最良パラメータで再学習
+        train_data_for_dlda = np.vstack([X_train.T, y_train.reshape(1, -1)])
+        best_W, _ = Dlda3_optimized(
+            train_data_for_dlda,
+            lambda_param=best_lambda_for_h,
+            h=h
+        )
+        
+        # テスト予測
+        train_proj = (X_train @ best_W).reshape(-1, 1)
+        test_proj = (X_test @ best_W).reshape(-1, 1)
+        
+        y_pred_test, _ = knn(train_proj, y_train, test_proj, k=3)
+        test_acc = measureEx(y_test, y_pred_test, 8) * 100
+        
+        test_acc_per_h.append(test_acc)
+        print(f"h={h:.4f}, best_lambda={best_lambda_for_h:.6f}, test_acc={test_acc:.4f}%")
 
-    # 6) テスト予測
-    train_proj = (X_train @ best_W).reshape(-1, 1)
-    test_proj = (X_test @ best_W).reshape(-1, 1)
-
-    y_pred_test, _ = knn(train_proj, y_train, test_proj, k=3)
-    test_acc = measureEx(y_test, y_pred_test, 8) * 100
-
-    print(f"Test Accuracy: {test_acc:.4f}%")
-
-    # 7) 保存
+    # 6) 保存
     os.makedirs("output", exist_ok=True)
-    np.savetxt("output/test_acc_DLDA.txt", np.array([test_acc]), fmt="%.6f")
-    print("Saved: output/test_acc_DLDA.txt")
+    np.savetxt("output/test_acc_DLDA.txt", np.array(test_acc_per_h), fmt="%.6f")
+    print(f"\nSaved {len(test_acc_per_h)} values to output/test_acc_DLDA.txt")
 
 
 if __name__ == "__main__":
